@@ -39,7 +39,7 @@ Tasks:
 Tasks:
 1. Write a fetch function for OpenWeather (temperature, humidity, rain, wind, UV) for Islamabad.
 2. Write a fetch function for AQICN (AQI and pollutants) for Islamabad.
-3. Combine both sources into one row per hour. Use one fixed rule and write it in the README (for example: average the two when both exist, otherwise use whichever one exists).
+3. Combine both sources into one row per hour. Use one fixed rule and write it in the README (for example: average the two when both exist, otherwise use whichever one exists). **Update (post-Phase 3):** this rule applies to temperature/humidity/rain/UV/wind (OpenWeather only). AQI does not use this averaging rule — see the Phase 3 note below and README.
 4. Fill gaps with one documented rule (for example: use the last known value if it is less than 3 hours old, otherwise leave it empty and flag it).
 5. Compute features:
    - Time features: hour, day, month
@@ -85,6 +85,20 @@ Tasks:
 5. Write a short summary for each metric in `reports/eda.md`.
 
 **Done when:** Every metric has a plot and a written summary.
+
+**Status: closed, pending AQI validation.** Every metric has plots and a
+written summary (`reports/eda.md`). The one open item: comparing our own
+EPA AQI calculation (OpenWeather PM2.5/PM10) against Open-Meteo's `us_aqi`
+on ~4,943 backfill hours found 74% of hours disagreeing by more than 10
+points — this was **not resolved**, only worked around. The live pipeline
+was changed to read AQI from Open-Meteo directly (same source as backfill)
+instead of reconciling the two calculations, which makes the training data
+consistent by design but does not prove the live and archive values agree.
+That proof isn't possible yet — Open-Meteo's archive lags ~1 day behind
+real time, so today's live-collected hours aren't in the archive to
+compare against. Re-run `src/eda/aqi_consistency_check.py` in ~2 days once
+they are, and only then treat this phase as fully closed. See
+`reports/aqi_validation.md` for full detail.
 
 ---
 
@@ -274,6 +288,7 @@ The report must cover:
 | OpenAI service is down or the key runs out of credit | Use the fixed template fallback (Phase 6); check the usage limit on your OpenAI account |
 | Model is worse than the naive baseline | Keep the baseline as the model until a better one is found |
 | GitHub Actions schedule runs late | Accept small delays; the forecast still uses the latest saved data |
+| Open-Meteo is the sole AQI source for both live and training data (changed in Phase 3 after our own EPA calculation disagreed with it on 74% of backfill hours) — if it goes down or changes its AQI methodology, the `aqi` column breaks for both live ingestion and future retraining at once | Fallback already implemented: `src/ingestion/fuse.py` falls back to the OpenWeather-PM2.5/PM10 EPA calculation if Open-Meteo's live call fails, flagged `aqi_is_imputed`-adjacent via the normal gap-fill path. That fallback is known to disagree with Open-Meteo's own number (not a drop-in equivalent), so a prolonged Open-Meteo outage should be treated as a data-quality incident, not silently absorbed |
 
 ---
 
