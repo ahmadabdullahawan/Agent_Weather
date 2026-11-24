@@ -43,7 +43,6 @@ Run with (from the project root):
 from datetime import datetime, timezone
 
 import pandas as pd
-import requests
 from dotenv import load_dotenv
 
 from config.location import LAT, LON
@@ -76,34 +75,15 @@ def check_live_self_consistency() -> dict:
     }
 
 
-def check_archive_catchup() -> dict:
-    """Whether today's date is already in the archive yet — if so, a
-    direct archive-vs-live same-hour comparison becomes possible and
-    this function runs it; if not (the usual ~1-day lag), it reports
-    that plainly instead of fabricating a comparison."""
-    today = datetime.now(timezone.utc).date()
-    r = requests.get(
-        "https://archive-api.open-meteo.com/v1/archive",
-        params={
-            "latitude": LAT,
-            "longitude": LON,
-            "start_date": today.isoformat(),
-            "end_date": today.isoformat(),
-            "hourly": "pm2_5",
-            "timezone": "UTC",
-        },
-        timeout=20,
-    )
-    has_data = r.ok and any(v is not None for v in r.json().get("hourly", {}).get("pm2_5", []))
-    return {"date_checked": today.isoformat(), "archive_has_data": has_data}
-
-
-def compare_archive_vs_live() -> pd.DataFrame:
-    """For every live-ingested hour (source="openweather_aqicn") whose
-    date the archive now covers, compares our stored `aqi` (which was
-    Open-Meteo's live value at ingestion time) against the archive's
-    value for that same hour — the real same-hour proof, run only once
-    the archive has caught up."""
+def compare_archive_vs_live() -> dict:
+    """For every live-ingested hour (source="openweather_aqicn") that has
+    a stored `aqi`, checks the archive for that hour's date and, where
+    the archive now covers it, compares our stored `aqi` (Open-Meteo's
+    live value at ingestion time) against the archive's value for that
+    same hour — the real same-hour proof. Checks against the actual
+    dates of live-ingested hours (not today's date) since the archive's
+    ~1-day lag means it can already cover yesterday's live hours even
+    though it never covers today's."""
     fs = hopsworks_io.connect()
     raw_fg = hopsworks_io.get_raw_fg(fs)
     features_fg = hopsworks_io.get_features_fg(fs)
@@ -114,18 +94,22 @@ def compare_archive_vs_live() -> pd.DataFrame:
     merged = live_hours.merge(features, on="timestamp", how="inner")
     merged = merged[merged["live_aqi"].notna()]
     if merged.empty:
-        return merged
+        return {"status": "no_live_rows", "comparison": merged, "dates_needed": [], "dates_covered": []}
 
     dates_needed = sorted({datetime.fromtimestamp(ts, tz=timezone.utc).date() for ts in merged["timestamp"]})
     archive_by_ts = {}
+    dates_covered = []
     for d in dates_needed:
         rows = fetch_range(LAT, LON, d, d)
+        if rows:
+            dates_covered.append(d)
         archive_by_ts.update({ts: row["aqi"] for ts, row in rows.items()})
 
     merged["archive_aqi"] = merged["timestamp"].map(archive_by_ts)
-    merged = merged[merged["archive_aqi"].notna()]
-    merged["diff"] = (merged["live_aqi"] - merged["archive_aqi"]).abs()
-    return merged
+    compared = merged[merged["archive_aqi"].notna()].copy()
+    compared["diff"] = (compared["live_aqi"] - compared["archive_aqi"]).abs()
+    status = "ok" if not compared.empty else "archive_not_caught_up"
+    return {"status": status, "comparison": compared, "dates_needed": dates_needed, "dates_covered": dates_covered}
 
 
 def load_aqicn_overlap() -> pd.DataFrame:
@@ -181,39 +165,42 @@ def run() -> None:
     )
 
     lines.append("## Archive catch-up status (direct same-hour proof, when available)\n")
-    catchup = check_archive_catchup()
+    result = compare_archive_vs_live()
     archive_vs_live_ok = None
-    if catchup["archive_has_data"]:
-        lines.append(f"- The archive now has data for {catchup['date_checked']} — running the direct comparison:\n")
-        comparison = compare_archive_vs_live()
-        n = len(comparison)
-        if n == 0:
-            lines.append(
-                "- No live-ingested hours overlap with archive-covered dates yet (the archive may "
-                "have only just caught up to dates with no live rows). Re-run once more hours exist.\n"
-            )
-        else:
-            mean_diff = comparison["diff"].mean()
-            max_diff = comparison["diff"].max()
-            exceed_pct = (comparison["diff"] > DISAGREEMENT_THRESHOLD).mean() * 100
-            archive_vs_live_ok = exceed_pct < 10
-            lines.append(f"- Hours compared: **{n}**")
-            lines.append(f"- Mean absolute difference: **{mean_diff:.2f} AQI points**")
-            lines.append(f"- Largest difference: **{max_diff:.2f} AQI points**")
-            lines.append(
-                f"- Share of hours differing by more than {DISAGREEMENT_THRESHOLD} AQI points: "
-                f"**{exceed_pct:.1f}%**\n"
-            )
-            lines.append(
-                f"**{'Agree closely — same-hour proof complete.' if archive_vs_live_ok else 'Do NOT agree closely — the single-source design does not actually solve the original disagreement.'}**\n"
-            )
-    else:
+    if result["status"] == "no_live_rows":
         lines.append(
-            f"- As of this run, the archive does not yet have data for {catchup['date_checked']} "
-            f"(the archive's usual ~1-day lag). This is expected, not an error. The live hours "
-            f"being ingested now (`src/ingestion/run.py`, and Phase 8's hourly job once set up) "
-            f"will become directly comparable against the archive once it catches up in a day or "
-            f"two — re-running this script then completes the proof with real matched hours.\n"
+            "- No live-ingested hours with a stored `aqi` exist yet. Run live ingestion "
+            "(`src/ingestion/run.py`) a few times first, then re-run this script.\n"
+        )
+    elif result["status"] == "archive_not_caught_up":
+        lines.append(
+            f"- {len(result['dates_needed'])} live-ingested date(s) need checking "
+            f"({', '.join(d.isoformat() for d in result['dates_needed'])}), but the archive "
+            f"doesn't cover any of them yet (the archive's usual ~1-day lag). This is expected, "
+            f"not an error. Re-running this script in a day or two, once the archive catches up "
+            f"to these dates, completes the proof with real matched hours.\n"
+        )
+    else:
+        comparison = result["comparison"]
+        n = len(comparison)
+        lines.append(
+            f"- Archive now covers {len(result['dates_covered'])} of "
+            f"{len(result['dates_needed'])} live-ingested date(s) "
+            f"({', '.join(d.isoformat() for d in result['dates_covered'])}) — running the direct comparison:\n"
+        )
+        mean_diff = comparison["diff"].mean()
+        max_diff = comparison["diff"].max()
+        exceed_pct = (comparison["diff"] > DISAGREEMENT_THRESHOLD).mean() * 100
+        archive_vs_live_ok = bool(exceed_pct < 10)
+        lines.append(f"- Hours compared: **{n}**")
+        lines.append(f"- Mean absolute difference: **{mean_diff:.2f} AQI points**")
+        lines.append(f"- Largest difference: **{max_diff:.2f} AQI points**")
+        lines.append(
+            f"- Share of hours differing by more than {DISAGREEMENT_THRESHOLD} AQI points: "
+            f"**{exceed_pct:.1f}%**\n"
+        )
+        lines.append(
+            f"**{'Agree closely — same-hour proof complete.' if archive_vs_live_ok else 'Do NOT agree closely — the single-source design does not actually solve the original disagreement.'}**\n"
         )
 
     lines.append(
@@ -222,7 +209,16 @@ def run() -> None:
         "stations/locations, not the same concentrations — relevant only to the live fusion's "
         "AQICN trust threshold. Does **not** gate Phase 4.\n"
     )
-    aqicn_overlap = load_aqicn_overlap()
+    try:
+        aqicn_overlap = load_aqicn_overlap()
+    except Exception as exc:
+        lines.append(
+            f"- Could not run this check: Hopsworks read failed ({exc}). This is the weaker, "
+            "non-gating check, so the failure is reported here rather than aborting the whole "
+            "script before the report below could be written. Re-run to retry.\n"
+        )
+        aqicn_overlap = pd.DataFrame()
+
     if len(aqicn_overlap) >= 2:
         corr = aqicn_overlap["aqicn_aqi"].corr(aqicn_overlap["ow_computed_aqi"])
         mae = (aqicn_overlap["aqicn_aqi"] - aqicn_overlap["ow_computed_aqi"]).abs().mean()

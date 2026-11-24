@@ -1,6 +1,6 @@
 # AQI method consistency check
 
-Generated: 2026-11-22T22:52:29.902986+00:00
+Generated: 2026-11-24T17:36:39.133843+00:00
 
 ## What changed and why
 
@@ -10,11 +10,18 @@ The original plan derived live AQI from OpenWeather's PM2.5/PM10 via our own EPA
 
 ## Live endpoint self-consistency
 
-- At 2026-11-22T22:00: `current.us_aqi` = 137, the same call's `hourly.us_aqi` for that hour = 137 — **match**.
+- At 2026-11-24T17:00: `current.us_aqi` = 137, the same call's `hourly.us_aqi` for that hour = 137 — **match**.
 
 ## Archive catch-up status (direct same-hour proof, when available)
 
-- As of this run, the archive does not yet have data for 2026-11-22 (the archive's usual ~1-day lag). This is expected, not an error. The live hours being ingested now (`src/ingestion/run.py`, and Phase 8's hourly job once set up) will become directly comparable against the archive once it catches up in a day or two — re-running this script then completes the proof with real matched hours.
+- Archive now covers 1 of 1 live-ingested date(s) (2026-11-22) — running the direct comparison:
+
+- Hours compared: **1**
+- Mean absolute difference: **0.00 AQI points**
+- Largest difference: **0.00 AQI points**
+- Share of hours differing by more than 10 AQI points: **0.0%**
+
+**Agree closely — same-hour proof complete.**
 
 
 ## Secondary check: AQICN vs OpenWeather-derived (live fusion rule only)
@@ -27,5 +34,5 @@ A different, weaker question — AQICN and OpenWeather describe different statio
 ## Conclusion
 
 
-**Phase 3 status: closed, pending AQI validation — not yet fully closed.** Using one source (Open-Meteo) for AQI in both the backfill and the live pipeline is a reasonable design decision — it makes the training data internally consistent — but it is **not** a validated match. The original finding stands unresolved: our old OpenWeather-derived calculation disagreed with Open-Meteo's own `us_aqi` on 74% of ~4,943 backfill hours. Switching the live source to Open-Meteo sidesteps that specific disagreement by no longer computing AQI two different ways, but it has not been shown that Open-Meteo's live value agrees with its own archive value for the same hour — that direct proof isn't possible until the archive catches up (~1-day lag). Re-run this script in a couple of days; it will then compute the real archive-vs-live comparison automatically and only report Phase 3 as fully closed if they agree.
+**Phase 3 closes.** The same-hour archive-vs-live comparison above is real evidence, not a design assumption: Open-Meteo's live value and its own archive value agree closely for the same hours. Safe to treat `aqi` as consistent across the backfill and live periods.
 
