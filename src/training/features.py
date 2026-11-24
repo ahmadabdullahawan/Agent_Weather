@@ -45,4 +45,14 @@ def build_full_matrix(df: pd.DataFrame, train_end: int) -> np.ndarray:
             X[col] = X[col].astype(float)
     medians = X.iloc[:train_end].median(numeric_only=True)
     X = X.fillna(medians)
+    # A column that's entirely NaN in train (rain_probability_pct,
+    # uv_index -- no historical data at all, see README) has a NaN
+    # median, so the fillna above is a no-op for it. Zero it out as a
+    # neutral placeholder rather than leaving real NaNs: Random Forest
+    # tolerates NaN natively and would silently ignore it either way,
+    # but the LSTM's manual scaling does not -- an all-NaN column would
+    # poison every window's loss to NaN, for every metric's model, not
+    # just these two (confirmed: this is why the LSTM rows came back
+    # empty for every metric on the first real run).
+    X = X.fillna(0.0)
     return X.to_numpy(dtype=float)

@@ -39,12 +39,19 @@ def fit(train_series: pd.Series):
 def rolling_forecast_24h(fitted, future_series: pd.Series) -> np.ndarray:
     """`future_series` must be the chronologically continuous series
     immediately following the one `fitted` was trained on (val+test
-    concatenated). Returns one 24h-ahead prediction per row."""
+    concatenated). Returns one 24h-ahead prediction per row.
+
+    Uses `.extend()`, not `.append()` -- extend() updates from the
+    existing filtered end-state in O(1) per new observation; append()
+    without copy_initialization=True silently re-filters the WHOLE
+    accumulated series from scratch on every call, which is O(n) per
+    call and O(n^2) overall (confirmed: it pegged CPU for minutes on a
+    ~1500-row rolling forecast before this fix)."""
     preds = np.empty(len(future_series))
     results = fitted
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for i, value in enumerate(future_series.to_numpy(dtype=float)):
-            results = results.append([value], refit=False)
+            results = results.extend([value])
             preds[i] = results.get_forecast(steps=24).predicted_mean[-1]
     return preds
